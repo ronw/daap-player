@@ -35,9 +35,11 @@ Run it from the python shell or use the included shell interface.
 __author__ = "Ron Weiss (ronw@ee.columbia.edu)"
 
 import cmd
+import glob
 import inspect
 import operator
 import os
+import pickle
 import pydoc
 import random
 import re
@@ -46,6 +48,11 @@ import sys
 import thread
 import time
 import types
+
+import mutagen
+import mutagen.easyid3
+import mutagen.mp3
+import mutagen.oggvorbis
 
 # for gstreamer
 import gobject 
@@ -249,26 +256,13 @@ class Playlist(list):
         return '\n'.join(['%d: %s' % (n+1, x) for n,x in enumerate(self)])
 
 
-class DaapCollection(object):
-    """
-    Representation of a music collection contained on a DAAP server.
-    """
-
-    def __init__(self, server='localhost', port=3689, password=None):
-        self.__session = None
-        client = daap.DAAPClient();
-        client.connect(server, port=port, password=password)
-        self.__session = client.login()
-        self.tracks = self.__session.library().tracks()
-
+class BaseCollection(object):
+    """Base representation of a music collection."""
+    def init(self):
         # Make sure tracks are sorted in some reasonable order.
-        for x in ['track', 'disc', 'album', 'year', 'artist']:
+        for x in ['uri', 'track', 'disc', 'album', 'year', 'artist']:
             self.tracks.sort(key=operator.attrgetter(x))
- 
-    def __del__(self):
-        if self.__session:
-            self.__session.logout()        
-
+    
     def search(self, pattern, fields=("artist", "album", "name"),
                flags=re.IGNORECASE):
         """ Return all tracks matching the given pattern. """
@@ -276,10 +270,112 @@ class DaapCollection(object):
         tracks = Playlist()
         for x in self.tracks:
             for y in fields:
-                if x.__getattr__(y) and pat.search(x.__getattr__(y)):
+                if getattr(x, y) and pat.search(getattr(x, y)):
                     tracks.append(x)
                     break
         return tracks
+
+
+class DaapCollection(BaseCollection):
+    """Music collection contained on a DAAP server."""
+    def __init__(self, server='localhost', port=3689, password=None):
+        self.__session = None
+        client = daap.DAAPClient();
+        client.connect(server, port=port, password=password)
+        self.__session = client.login()
+        self.tracks = self.__session.library().tracks()
+
+        self.init()
+ 
+    def __del__(self):
+        if self.__session:
+            self.__session.logout()        
+
+
+class DirectoryCollection(BaseCollection):
+    """Music collection contained on the filesystem."""
+    def __init__(self, basedir, extensions=['mp3', 'ogg', 'flac', 'wav']):
+        basedir = os.path.abspath(os.path.expanduser(basedir))
+        extensions = [x.lower() for x in extensions]
+        tracks = []
+        for path, dirs, files in os.walk(basedir):
+            tracks.extend([Track(os.path.join(path, x)) for x in files
+                           if os.path.splitext(x)[-1][1:].lower() in extensions])
+        self.tracks = tracks
+
+        self.init()
+
+
+class Track(object):
+    required_attrs = dict(track=None, disc=None, album=None, year=None,
+                          artist=None, time=None, format=None)
+
+    attrmaps = {mutagen.oggvorbis.OggVorbis: {'track': 'tracknumber',
+                                              'name': 'title',
+                                              'time': 'length'},
+                mutagen.easyid3.EasyID3:     {'track': 'tracknumber',
+                                              'name': 'title',
+                                              'time': 'length'},
+                }
+    filetypes = {mutagen.oggvorbis.OggVorbis: 'ogg',
+                 mutagen.easyid3.EasyID3: 'mp3',
+                 mutagen.mp3.MP3: 'mp3',
+                 }
+
+    @classmethod
+    def _parse_val(cls, val):
+        try:
+            if type(val) is types.ListType:
+                val = val[0]
+        except KeyError, e:
+            print "Could not read %s" % key
+        return val
+
+    def __init__(self, filename):
+        self.uri = 'file://%s' % filename
+        self.filename = filename
+        self.name = os.path.basename(filename)
+
+        print "Loading %s" % filename
+        for key,val in Track.required_attrs.iteritems():
+            setattr(self, key, val)
+        try:
+            self.metadata = mutagen.File(filename)
+            if type(self.metadata) is mutagen.mp3.MP3:
+                self.metadata = mutagen.easyid3.EasyID3(filename)
+        except Exception, e:
+            print "Could not read track metadata: ", e
+            return
+
+        self.format = type(self.metadata)
+        if self.format in Track.filetypes:
+            self.format = Track.filetypes[self.format]
+
+        for key, val in self.metadata.iteritems():
+            setattr(self, key, Track._parse_val(val))
+        if hasattr(self.metadata, 'info'):
+            for key, val in self.metadata.info.__dict__.iteritems():
+                setattr(self, key, Track._parse_val(val))
+        if type(self.metadata) in Track.attrmaps:
+            for key, val in Track.attrmaps[type(self.metadata)].iteritems():
+                if hasattr(self, val):
+                    setattr(self, key, getattr(self, val))
+
+    def __unicode__(self):
+        tn = ''
+        if self.track:
+            tn = '%s - ' % self.track
+        tm = ''
+        if self.time:
+            tm = ' [%0.2f]' % self.time
+        yr = ''
+        if self.year:
+            yr = ' (%s)' % self.year
+        return u'%s - %s%s - %s%s%s (%s)' % (self.artist, self.album, yr, tn,
+                                             self.name, tm, self.format)
+
+    def __str__(self):
+        return str(self.__unicode__().encode('utf-8', 'replace'))
 
 
 def print_to_pager(string):
@@ -437,9 +533,9 @@ class PlayerShell(cmd.Cmd):
         if x == 0:
             self.current_track = 1
 
-    def do_load(self, rest):
+    def do_loaddaap(self, rest):
         """
-        load server[:port] [password]
+        loaddaap server[:port] [password]
         Load track collection from the given DAAP server.
         """
         server = "localhost"
@@ -457,6 +553,45 @@ class PlayerShell(cmd.Cmd):
         try:
             self.collection = DaapCollection(server, port, password)
             print "Loaded %d tracks." % len(self.collection.tracks)
+            print self.collection.tracks
+        except Exception, e:
+            print "Error:", e
+
+    def do_loaddir(self, rest):
+        """
+        loaddaap basedir
+        Load track collection from the given directory.
+        """
+        try:
+            self.collection = DirectoryCollection(rest)
+            print "Loaded %d tracks." % len(self.collection.tracks)
+            print self.collection.tracks
+        except Exception, e:
+            print "Error:", e
+
+    def do_loadpkl(self, rest):
+        """
+        loadpkl /path/to/tracks.pkl
+        Load previously saved track collection from the give pickle file.
+        """
+        try:
+            f = open(rest, 'r')
+            self.collection = pickle.load(f)
+            f.close()
+            print "Loaded %d tracks." % len(self.collection.tracks)
+            print self.collection.tracks
+        except Exception, e:
+            print "Error:", e
+
+    def do_savecollection(self, rest):
+        """
+        savecollection /path/to/tracks.pkl
+        Save collection to the given pickle file.
+        """
+        try:
+            f = open(rest, 'w')
+            pickle.dump(self.collection, f, pickle.HIGHEST_PROTOCOL)
+            f.close()
         except Exception, e:
             print "Error:", e
 
@@ -511,7 +646,6 @@ class PlayerShell(cmd.Cmd):
         playlist = self.do_search(rest, print_tracks=False)
         self.player.playlist.extend(playlist)
         print 'Added %d items.' % len(playlist)
-        #self.do_playlist(None)
 
     def do_clear(self, rest):
         """
