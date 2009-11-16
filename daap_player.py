@@ -48,6 +48,7 @@ import sys
 import thread
 import time
 import types
+import urllib
 
 import mutagen
 import mutagen.easyid3
@@ -332,7 +333,7 @@ class Track(object):
         return val
 
     def __init__(self, filename):
-        self.uri = 'file://%s' % filename
+        self.uri = 'file://%s' % urllib.quote(filename)
         self.filename = filename
         self.name = os.path.basename(filename)
 
@@ -360,6 +361,12 @@ class Track(object):
             for key, val in Track.attrmaps[type(self.metadata)].iteritems():
                 if hasattr(self, val):
                     setattr(self, key, getattr(self, val))
+
+        if not self.track is None:
+            try:
+                self.track = int(self.track)
+            except ValueError:
+                pass
 
     def __unicode__(self):
         tn = ''
@@ -553,7 +560,6 @@ class PlayerShell(cmd.Cmd):
         try:
             self.collection = DaapCollection(server, port, password)
             print "Loaded %d tracks." % len(self.collection.tracks)
-            print self.collection.tracks
         except Exception, e:
             print "Error:", e
 
@@ -565,7 +571,6 @@ class PlayerShell(cmd.Cmd):
         try:
             self.collection = DirectoryCollection(rest)
             print "Loaded %d tracks." % len(self.collection.tracks)
-            print self.collection.tracks
         except Exception, e:
             print "Error:", e
 
