@@ -50,10 +50,7 @@ import time
 import types
 import urllib
 
-import mutagen
-import mutagen.easyid3
-import mutagen.mp3
-import mutagen.oggvorbis
+import tagpy
 
 # for gstreamer
 import gobject 
@@ -308,29 +305,9 @@ class DirectoryCollection(BaseCollection):
 
 
 class Track(object):
-    required_attrs = dict(track=None, disc=None, album=None, year=None,
-                          artist=None, time=None, format=None)
-
-    attrmaps = {mutagen.oggvorbis.OggVorbis: {'track': 'tracknumber',
-                                              'name': 'title',
-                                              'time': 'length'},
-                mutagen.easyid3.EasyID3:     {'track': 'tracknumber',
-                                              'name': 'title',
-                                              'time': 'length'},
-                }
-    filetypes = {mutagen.oggvorbis.OggVorbis: 'ogg',
-                 mutagen.easyid3.EasyID3: 'mp3',
-                 mutagen.mp3.MP3: 'mp3',
+    filetypes = {tagpy._tagpy.mpeg_File: 'mp3',
+                 tagpy._tagpy.ogg_vorbis_File: 'ogg',
                  }
-
-    @classmethod
-    def _parse_val(cls, val):
-        try:
-            if type(val) is types.ListType:
-                val = val[0]
-        except KeyError, e:
-            print "Could not read %s" % key
-        return val
 
     def __init__(self, filename):
         self.uri = 'file://%s' % urllib.quote(filename)
@@ -338,35 +315,32 @@ class Track(object):
         self.name = os.path.basename(filename)
 
         print "Loading %s" % filename
-        for key,val in Track.required_attrs.iteritems():
+        self._read_metadata_from_file()
+
+    def _read_metadata_from_file(self):
+        required_attrs = dict(track=None, disc=None, album=None, year=None,
+                              artist=None, time=None, format=None)
+        for key,val in required_attrs.iteritems():
             setattr(self, key, val)
+
         try:
-            self.metadata = mutagen.File(filename)
-            if type(self.metadata) is mutagen.mp3.MP3:
-                self.metadata = mutagen.easyid3.EasyID3(filename)
+            fileref = tagpy.FileRef(self.filename)
         except Exception, e:
             print "Could not read track metadata: ", e
             return
 
-        self.format = type(self.metadata)
+        tags = fileref.tag()
+        tagmap = dict(name='title', album='album',
+                      artist='artist', track='track', year='year')
+        for key, val in tagmap.iteritems():
+            setattr(self, key, getattr(tags, val))
+        
+        audioProperties = fileref.audioProperties()
+        self.time = audioProperties.length
+
+        self.format = type(fileref.file())
         if self.format in Track.filetypes:
             self.format = Track.filetypes[self.format]
-
-        for key, val in self.metadata.iteritems():
-            setattr(self, key, Track._parse_val(val))
-        if hasattr(self.metadata, 'info'):
-            for key, val in self.metadata.info.__dict__.iteritems():
-                setattr(self, key, Track._parse_val(val))
-        if type(self.metadata) in Track.attrmaps:
-            for key, val in Track.attrmaps[type(self.metadata)].iteritems():
-                if hasattr(self, val):
-                    setattr(self, key, getattr(self, val))
-
-        if not self.track is None:
-            try:
-                self.track = int(self.track)
-            except ValueError:
-                pass
 
     def __unicode__(self):
         tn = ''
