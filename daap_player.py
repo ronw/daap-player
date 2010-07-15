@@ -250,6 +250,18 @@ class Playlist(list):
     def clear(self):
         self.__delslice__(0, len(self))
 
+    def search(self, pattern, fields=("artist", "album", "name"),
+               flags=re.IGNORECASE):
+        """ Return all tracks matching the given pattern. """
+        pat = re.compile(pattern, flags)
+        tracknums = []
+        for n,x in enumerate(self):
+            for y in fields:
+                if getattr(x, y) and pat.search(getattr(x, y)):
+                    tracknums.append(n)
+                    break
+        return tracknums
+
     def __str__(self):
         return '\n'.join(['%d: %s' % (n+1, x) for n,x in enumerate(self)])
 
@@ -574,12 +586,15 @@ class PlayerShell(cmd.Cmd):
         except Exception, e:
             print "Error:", e
 
-    def do_search(self, rest, print_tracks=True):
+    def do_search(self, rest, print_tracks=True, collection=None):
         """
         search pattern [in field1 or field2 or ... [AND [pattern] [in field] ...]]
         Search collection for tracks whose given pattern matches any of
         the listed fields (defaults to "artist album name").
         """
+        if collection is None:
+            collection = self.collection
+        
         if not self.collection:
             print "No collection loaded, run load first."
             return
@@ -587,7 +602,7 @@ class PlayerShell(cmd.Cmd):
         default_attrs = ('artist', 'album', 'name')
         try:
             if not rest:
-                tracks = self.collection.search(pattern, fields=default_attrs)
+                tracks = collection.search(pattern, fields=default_attrs)
             else:
                 tracks = None
                 terms = re.compile('and', re.IGNORECASE).split(rest)
@@ -597,7 +612,7 @@ class PlayerShell(cmd.Cmd):
                     attrs = default_attrs
                     if len(fields) > 1:
                         attrs = [x.strip() for x in fields[1].split(' or ')]
-                    curr_tracks = self.collection.search(pattern, fields=attrs)
+                    curr_tracks = collection.search(pattern, fields=attrs)
                     if not tracks:
                         tracks = curr_tracks
                     else:
@@ -625,6 +640,32 @@ class PlayerShell(cmd.Cmd):
         playlist = self.do_search(rest, print_tracks=False)
         self.player.playlist.extend(playlist)
         print 'Added %d items.' % len(playlist)
+
+    def do_skipto(self, rest):
+        """
+        skipto pattern [in field1 or field2 or ... [AND [pattern] [in field] ...]]
+        Search current playlist for tracks whose given pattern matches any of
+        the listed fields (defaults to "artist album title") and skip
+        to the first matching result after the current track.
+        """
+        tracknums = self.do_search(rest, print_tracks=False,
+                                   collection=self.player.playlist)
+        if tracknums:
+            print 'Found %d matching tracks in playlist.' % len(tracknums)
+            futuretracknums = [x for x in tracknums
+                               if x > self.player.current_track - 1]
+            if futuretracknums:
+                track = futuretracknums[0]
+            else:
+                # Have to wrap back to the beginning of the playlist.hem
+                track = tracknums[0]
+
+            print 'Skipping to [%d/%d]: %s' % (track+1,
+                                               len(self.player.playlist),
+                                               self.player.playlist[track])
+            self.player.current_track = track + 1
+        else:
+            print "Couldn't find any matching tracks."
 
     def do_clear(self, rest):
         """
